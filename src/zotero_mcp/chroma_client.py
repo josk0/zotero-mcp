@@ -38,6 +38,7 @@ class OpenAIEmbeddingFunction(EmbeddingFunction):
     """Custom OpenAI embedding function for ChromaDB."""
 
     max_input_tokens = 8000  # text-embedding-3-* limit is 8191
+    max_batch_tokens = 290000  # OpenAI limit is 300k; leave headroom
 
     def __init__(self, model_name: str = "text-embedding-3-small", api_key: str | None = None, base_url: str | None = None):
         self.model_name = model_name
@@ -69,13 +70,41 @@ class OpenAIEmbeddingFunction(EmbeddingFunction):
             base_url=config.get("base_url"),
         )
 
+    def _embed_with_batching(self, input: Documents) -> Embeddings:
+        """Generate embeddings, splitting into sub-batches to stay under the per-request token limit."""
+        if not input:
+            return []
+
+        # Split input into sub-batches based on estimated token count
+        batches: list[list[str]] = []
+        current_batch: list[str] = []
+        current_tokens = 0
+
+        for text in input:
+            est_tokens = len(text) // 4  # conservative: ~4 chars per token
+            # Always add at least one doc per batch (even if it alone exceeds the limit)
+            if current_tokens + est_tokens > self.max_batch_tokens and current_batch:
+                batches.append(current_batch)
+                current_batch = [text]
+                current_tokens = est_tokens
+            else:
+                current_batch.append(text)
+                current_tokens += est_tokens
+        if current_batch:
+            batches.append(current_batch)
+
+        all_embeddings: Embeddings = []
+        for batch in batches:
+            response = self.client.embeddings.create(
+                model=self.model_name,
+                input=batch
+            )
+            all_embeddings.extend([data.embedding for data in response.data])
+        return all_embeddings
+
     def __call__(self, input: Documents) -> Embeddings:
         """Generate embeddings using OpenAI API."""
-        response = self.client.embeddings.create(
-            model=self.model_name,
-            input=input
-        )
-        return [data.embedding for data in response.data]
+        return self._embed_with_batching(input)
 
 
 class GeminiEmbeddingFunction(EmbeddingFunction):
